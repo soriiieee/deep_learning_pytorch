@@ -1,2 +1,5 @@
 env/
 dat/
+out/
+log/
+jupyter/.ipynb_checkpoints/
