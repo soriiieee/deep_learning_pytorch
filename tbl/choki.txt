@@ -1,0 +1,4 @@
+PATH /mnt/product
+URL  http://micproxy2.core.micos.jp
+ID   micosguest
+PW   mic6guest

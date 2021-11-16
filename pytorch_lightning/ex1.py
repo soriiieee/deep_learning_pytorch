@@ -26,7 +26,7 @@ from pytorch_forecasting.models.temporal_fusion_transformer.tuning import optimi
 DATAHOME="/Users/soriiieee/work2/sci/d0727/deep_learning_pytorch/dat/lightning"
 
 # -- dataset downloads ---- #
-from pytorch_forecasting.data.examples import get_stallion_data
+from utils_data import load_data
 
 def check_data():
   df = get_stallion_data()
@@ -40,16 +40,17 @@ def check_data():
        'football_gold_cup', 'beer_capital', 'music_fest',
        'discount_in_percent', 'timeseries']
   print(df["date"].dt.year )
+  return
+
 
 
 def set_data():
-  df = get_stallion_data()
-
-  df["time_idx"] = df["date"].dt.year * 12 + df["date"].dt.month
-  df["time_idx"] -= df["time_idx"].min()
-  print(df["time_idx"].head())
-  # add category ---
-  df["month"] = 
+  df = load_data(reset=False)
+  # print(df.sample(5,random_state=1))
+  print(df.describe())
+  # data.sample(10, random_state=521)
+  # print(df.columns)
+  
 #commands ---
 # check_data()
 set_data()

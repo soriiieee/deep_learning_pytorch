@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
-# when   : 2020.0x.xx
-# who : [sori-machi]
-# what : [ ]
+"""
+torch のseq2seqモデルの実装を行うようにするprogram
+date: 2021.10.29
+date: 2021.11.02　全然成果が得られなかった-->50000回実施して精度acc＝1.3%前後、やはり、正解値を出力しながらの予測の精度は著しく悪化する
+"""
+
 #---------------------------------------------------------------------------
 # basic-module
 import matplotlib.pyplot as plt
@@ -14,46 +17,265 @@ warnings.simplefilter('ignore')
 from tqdm import tqdm
 import seaborn as sns
 
-import torch
-import torch.nn as nn
+try:
+  print("[OK] import torch modules ...")
+  import torch
+  import torch.nn as nn
+  import torch.optim as optim
+  from torch.utils.data import DataLoader, TensorDataset
+  device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+except:
+  print("[NG] Not import pytorch modules ...")
+  sys.exit()
+
 import numpy as np
-from sklearn import datasets
+# from sklearn import datasets
+import random
+from sklearn.utils import shuffle
+from sklearn.model_selection import train_test_split
+from net import Encoder,Decoder
+import pickle
 
-# 0) prepair data
-x_numpy,y_numpy = datasets.make_regression(n_samples=100, n_features=1, noise=20, random_state = 1) 
-X = torch.from_numpy(x_numpy.astype(np.float32))
-y = torch.from_numpy(y_numpy.astype(np.float32))
-y = y.view(y.shape[0], 1)
+from utils import save_model,load_model
 
-n_samples, n_features = X.shape
+# https://qiita.com/m__k/items/b18756628575b177b545
+CHAR2ID = { str(i): i for i in range(10)} # "0": 0 のような形
+CHAR2ID.update({" ":10,"-": 11,"_":12})
+ID2CHAR = { i : str(i) for i in range(10)}
+ID2CHAR.update({10:"", 11:"-", 12:""})
 
-# 1) model
-input_size =n_features
-output_size = 1
-model = nn.Linear(input_size,output_size)
+# module ---------------------
+def generate_number():
+  n = [ random.choice(list("0123456789")) for _ in range(random.randint(1,3))]
+  return int("".join(n))
 
-# 2) loas and optimizer
-learning_rate= 0.01
-loss_func = nn.MSELoss()
-optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-# 3) 
-num_epoch = 100
-for epoch in range(num_epoch):
-  #forward pass and loss
-  y_pred = model(X)
-  loss = loss_func(y_pred, y)
-  #backward path"
-  loss.backward()
+def add_padding(n, is_input = True):
+  if is_input:
+    num = "{: <7}".format(n)
+  else:
+    num = "{: <5}".format(n)
+  return num
+#-----------------------------
+
+def dataset(N=50000):
+  _input = []
+  _output =[]
+  while len(_input) <N:
+    x,y  = generate_number(),generate_number()
+    z = x-y #普通の演算
+    
+    input_char = add_padding(str(x) + "-" + str(y))
+    out_char = add_padding("_" + str(z), is_input=False)
+    
+    # _input.append(input_char)
+    # _output.append(out_char)
+    _input.append([ CHAR2ID[c] for c in input_char ])
+    _output.append([ CHAR2ID[c] for c in out_char ])
+    
+    
+    #numpy ---
+  _input = np.array(_input)
+  _output = np.array(_output)
+  return _input, _output
+
+
+def getLoader(X,y,batch_size=4):
+  # from torch.utils.data import DataLoader, TensorDataset
   
-  #update
-  optimizer.step()
+  # lbl = torch.LongTensor(_ll2) #大きな値の分類について(整数型で格納して利用するというもの)
+  X = torch.LongTensor(X)
+  y = torch.LongTensor(y)
+  dataset = TensorDataset(X,y)
+  loader = DataLoader(dataset,batch_size=batch_size)
+
+  return loader
+
+
+def train(model_set,dataloader):
+  encoder, decoder = model_set["model"]
+  criterion = model_set["criterion"]
+  en_opt, de_opt = model_set["optimizer"]
   
-  optimizer.zero_grad()
-  if (epoch + 1)%10==0:
-    print(f'epoch: {epoch + 1}, loss = {loss}')
+  
+  _loss_per_loader  = []
+  for X,y in dataloader:
+    X,y = X.to(device),y.to(device)
+    # print(X.size())
+    # print(y.size())
+    # print(X[0,:], y[0,:])
+    # sys.exit()
+    en_opt.zero_grad()
+    de_opt.zero_grad()
+    
+    decoder_input = y[:,:-1]
+    decoder_target = y[:,1:]
+    # print(decoder_input[0,:], decoder_target[0,:])
+    encoder_state = encoder(X)
+    # print(encoder_state[0].size(),encoder_state[1].size()) #torch.Size([1, 40, 128]) torch.Size([1, 40, 128])
+    decoder_output , _ = decoder(decoder_input, encoder_state)
+    
+    loss = 0
+    for j in range(decoder_output.size()[1]):
+      loss += criterion(decoder_output[:,j,:], decoder_target[:,j])
+    epoch_loss = loss.item()
+    _loss_per_loader.append(epoch_loss)
+    # print(decoder_output.size())
+    # print(decoder_output[0,:,:])
+    # print(decoder_target[0,:])
+    loss.backward()
+    en_opt.step()
+    de_opt.step()
+  
+  loss_value = np.round(np.mean(_loss_per_loader),4)
+  model_set ={
+    "model" : [encoder,decoder],
+    "criterion" : criterion,
+    "optimizer" : [en_opt,de_opt]
+  }
+  return loss_value,model_set
+
+def valid(model_set,dataloader):
+  encoder, decoder = model_set["model"]
+  batch_size = model_set["batch_size"]
+  
+  def get_max_index(decoder_output):
+    _res = []
+    for h in decoder_output:
+      idx = torch.argmax(h)
+      _res.append(idx)
+    
+    res_tensror = torch.tensor(_res, device=device).view(batch_size,1)
+    return res_tensror
+  
+  _pred=[]
+  with torch.no_grad(): #勾配の計算はしない
+    
+    for X,y in dataloader:
+      X,y = X.to(device),y.to(device)
+    
+      encoder_state = encoder(X)
+      start_char_batch = [ [CHAR2ID["_"]] for _ in range(batch_size)]
+      decoder_input_tensor = y = torch.LongTensor(start_char_batch, device=device)
+      # 変数名の変換 --->
+      decoder_hidden = encoder_state #共通で利用するencoderのoutputを利用する2021.11.2
+      # batch　毎の結果を格納する容器
+      batch_tmp = torch.zeros(batch_size,1, dtype=torch.long,device=device)
+      
+      for _ in range(5):#encode(state) & "_"　から文字の生成を行う
+        """
+        初期のdecoder_hiddenには、encoder_outputの値を入れて、2文字目からは1文字目の出力の値を格納
+        """
+        decoder_output,decoder_hidden = decoder(decoder_input_tensor,decoder_hidden)
+        decoder_out_next = get_max_index(decoder_output.squeeze())
+        # print(decoder_output.size())# [400,1,13]
+        # print(decoder_output.squeeze().size()) #[400,13] 1次元削除
+        batch_tmp = torch.cat([batch_tmp,decoder_out_next], dim=1)
+      
+      _pred.append(batch_tmp[:,1:]) #"_"を削除して次
+  
+  return _pred
 
 
-predicted = model(X).detach().numpy()
-plt.plot(x_numpy, y_numpy, "ro")
-plt.plot(x_numpy, predicted, "b")
-plt.savefig("../out/torch_07.png", bbox_inches="tight")
+
+
+def main(N=100, batch_size=40, EPOCH=100):
+  _input, _output = dataset(N=N)
+  x_train,x_test,y_train,y_test = train_test_split(_input, _output, train_size=0.7)
+  
+  train_loader = getLoader(x_train,y_train,batch_size=batch_size)
+  test_loader = getLoader(x_test,y_test,batch_size=batch_size)
+  # print(train_loader)
+  # print("train->", x_train.shape[0],"test->", x_test.shape[0])
+  # sys.exit()
+  #-setting ---------
+  embedding_dim = 200 #文字の埋込次元数
+  hidden_dim = 128 #LSTMの隠れ層サイズ
+  vocab_size = len(CHAR2ID)
+  # print(embedding_dim, hidden_dim,vocab_size)
+
+  # model ----------
+  encoder = Encoder(vocab_size, embedding_dim,hidden_dim).to(device)
+  decoder = Decoder(vocab_size, embedding_dim,hidden_dim).to(device)
+  # loss function ----
+  criterion = nn.CrossEntropyLoss()
+  # "optimizer" -----
+  encoder_optimizer = optim.Adam(encoder.parameters(), lr=0.001)
+  decoder_optimizer = optim.Adam(decoder.parameters(), lr=0.001)
+
+  model_set ={
+    "model" : [encoder,decoder],
+    "criterion" : criterion,
+    "optimizer" : [encoder_optimizer,decoder_optimizer]
+  }
+  
+  _loss =[]
+  for epoch in range(EPOCH):
+    train_loss, model_set = train(model_set,train_loader)
+    print("Epoch %d: %.2f" % (epoch, train_loss))
+    _loss.append(train_loss)
+    
+    # if train_loss < 1:
+    #   break
+  # ------------------------------------
+  # csv file ----> 
+  if 1:
+    df = pd.DataFrame()
+    df["EPOCH"] = np.array(list(range(EPOCH))) + 1
+    df["train_LOSS"] = _loss
+    df.to_csv("./torch_07.csv", index=False)
+  # ------------------------------------
+  # png file ---->
+  if 1:
+    f,ax = plt.subplots(figsize=(15,7))
+    ax.plot(df["EPOCH"], df["train_LOSS"] ,label="train_LOSS", marker = "o")
+    ax.legend()
+    f.savefig("./torch_07.png", bbox_inches="tight")
+  #----------------------
+  # model save
+  encoder, decoder = model_set["model"]
+  save_model("./encoder_fitted.pkl",encoder)
+  save_model("./decoder_fitted.pkl",decoder)
+  # ------------------------------------
+  return
+  # print(x_train.shape,y_train.shape)
+  # print(x_test.shape,y_test.shape)
+#------検証の結果を表示するようなprogramについて----
+def main2(N=2000, batch_size=400, EPOCH=100):
+  _input, _output = dataset(N=N)
+  # x_train,x_test,y_train,y_test = train_test_split(_input, _output, train_size=0.7)
+  data_loader = getLoader(_input,_output,batch_size=batch_size)
+  encoder = load_model("./encoder_fitted.pkl")
+  decoder = load_model("./decoder_fitted.pkl")
+  model_set ={"model" : [encoder,decoder],"batch_size" : batch_size}
+  #main routine ---
+  _pred = valid(model_set,data_loader)
+  
+  _row =[]
+  for i,(X,y) in enumerate(data_loader):
+    pred = _pred[i]
+    # print(X.size(),y.size(), pred.size()) [40, 7])[40, 5])[40, 5])
+    for in_x,true_y,pred_y in zip(X,y,pred):
+      x = [ ID2CHAR[i.item()] for i in in_x]
+      y = [ ID2CHAR[i.item()] for i in true_y]
+      p = [ ID2CHAR[i.item()] for i in pred_y]
+
+      x_str = "".join(x)
+      y_str = "".join(y)
+      p_str = "".join(p)
+      
+      judge = "o" if y_str == p_str else "x"
+      
+      _row.append([x_str,y_str,p_str, judge])
+  df =  pd.DataFrame(_row,columns = ["input","answer","predict","judge"])
+  n_acc = len(df[df["judge"]== "o"])
+  print(f"acc[%] = {n_acc*100/len(df):.3f}")
+  print("MISTAKE(30)","-"*30)
+  print(df[df["judge"]=="x"].head(30))
+  sys.exit()
+
+if __name__ == "__main__":
+  # fit model ---->
+  main(N=50000, batch_size=500, EPOCH=30) #train
+  main2(N=1000, batch_size=40) #test
+  
+  
